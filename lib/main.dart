@@ -1,9 +1,14 @@
 import 'package:flutter/material.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
+import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'firebase_options.dart';
 
-void main() {
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
   runApp(const StockTrackerApp());
 }
 
@@ -19,7 +24,99 @@ class StockTrackerApp extends StatelessWidget {
         primaryColor: Colors.blueAccent,
         colorScheme: const ColorScheme.dark(primary: Colors.blueAccent),
       ),
-      home: const StockHomePage(),
+      home: StreamBuilder<User?>(
+        stream: FirebaseAuth.instance.authStateChanges(),
+        builder: (context, snapshot) {
+          if (snapshot.hasData) {
+            return const StockHomePage();
+          } else {
+            return const AuthPage();
+          }
+        },
+      ),
+    );
+  }
+}
+
+class AuthPage extends StatefulWidget {
+  const AuthPage({super.key});
+
+  @override
+  State<AuthPage> createState() => _AuthPageState();
+}
+
+class _AuthPageState extends State<AuthPage> {
+  final _emailController = TextEditingController();
+  final _passwordController = TextEditingController();
+  bool isLogin = true;
+
+  Future<void> _submit() async {
+    try {
+      if (isLogin) {
+        await FirebaseAuth.instance.signInWithEmailAndPassword(
+          email: _emailController.text.trim(),
+          password: _passwordController.text.trim(),
+        );
+      } else {
+        await FirebaseAuth.instance.createUserWithEmailAndPassword(
+          email: _emailController.text.trim(),
+          password: _passwordController.text.trim(),
+        );
+      }
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(e.toString()), backgroundColor: Colors.red),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: Text(isLogin ? 'Connexion' : 'Inscription')),
+      body: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const Icon(Icons.lock, size: 100, color: Colors.blueAccent),
+            const SizedBox(height: 40),
+            TextField(
+              controller: _emailController,
+              decoration: const InputDecoration(
+                labelText: 'Email',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 20),
+            TextField(
+              controller: _passwordController,
+              obscureText: true,
+              decoration: const InputDecoration(
+                labelText: 'Mot de passe',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 20),
+            ElevatedButton(
+              onPressed: _submit,
+              child: Text(isLogin ? 'Se connecter' : 'Créer un compte'),
+            ),
+            TextButton(
+              onPressed: () {
+                setState(() {
+                  isLogin = !isLogin;
+                });
+              },
+              child: Text(
+                isLogin
+                    ? "Pas encore de compte ? S'inscrire"
+                    : "Déjà un compte ? Se connecter",
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -36,40 +133,53 @@ class _StockHomePageState extends State<StockHomePage> {
 
   final TextEditingController _controller = TextEditingController();
   List<String> _stocks = [];
-
   Map<String, Map<String, dynamic>> _stockData = {};
+
+  String get userId => FirebaseAuth.instance.currentUser!.uid;
 
   @override
   void initState() {
     super.initState();
-    _loadStocks();
+    _loadStocksFromCloud();
   }
 
-  Future<void> _loadStocks() async {
-    final prefs = await SharedPreferences.getInstance();
-    setState(() {
-      _stocks = prefs.getStringList('my_stocks') ?? [];
-    });
-    for (String symbol in _stocks) {
-      _fetchStockPrice(symbol);
+  Future<void> _loadStocksFromCloud() async {
+    try {
+      final doc = await FirebaseFirestore.instance
+          .collection('users')
+          .doc(userId)
+          .get();
+      if (doc.exists) {
+        setState(() {
+          _stocks = List<String>.from(doc.data()?['stocks'] ?? []);
+        });
+        for (String symbol in _stocks) {
+          _fetchStockPrice(symbol);
+        }
+      }
+    } catch (e) {
+      print("Erreur de chargement Cloud : $e");
     }
   }
 
-  Future<void> _saveStocks() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setStringList('my_stocks', _stocks);
+  Future<void> _saveStocksToCloud() async {
+    try {
+      await FirebaseFirestore.instance.collection('users').doc(userId).set({
+        'stocks': _stocks,
+      });
+    } catch (e) {
+      print("Erreur de sauvegarde Cloud : $e");
+    }
   }
 
   Future<void> _fetchStockPrice(String symbol) async {
     final url = Uri.parse(
       'https://finnhub.io/api/v1/quote?symbol=$symbol&token=$apiKey',
     );
-
     try {
       final response = await http.get(url);
       if (response.statusCode == 200) {
         final data = json.decode(response.body);
-
         if (data['c'] != 0) {
           setState(() {
             _stockData[symbol] = {
@@ -78,13 +188,10 @@ class _StockHomePageState extends State<StockHomePage> {
               'percent': data['dp'],
             };
           });
-        } else {
-          _showError("L'action $symbol est introuvable sur le marché.");
-          _removeStock(_stocks.indexOf(symbol));
         }
       }
     } catch (e) {
-      print("Erreur de connexion pour $symbol");
+      print("Erreur : $e");
     }
   }
 
@@ -93,9 +200,9 @@ class _StockHomePageState extends State<StockHomePage> {
     if (symbol.isNotEmpty && !_stocks.contains(symbol)) {
       setState(() {
         _stocks.add(symbol);
-        _saveStocks();
         _controller.clear();
       });
+      _saveStocksToCloud();
       _fetchStockPrice(symbol);
     }
   }
@@ -105,22 +212,28 @@ class _StockHomePageState extends State<StockHomePage> {
       String symbolToRemove = _stocks[index];
       _stocks.removeAt(index);
       _stockData.remove(symbolToRemove);
-      _saveStocks();
     });
-  }
-
-  void _showError(String message) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(message), backgroundColor: Colors.red),
-    );
+    _saveStocksToCloud();
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('📊 Mon Screener Bourse en Direct'),
+        title: const Text('📊 Mon Screener Cloud'),
         centerTitle: true,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.logout, color: Colors.redAccent),
+            onPressed: () {
+              setState(() {
+                _stocks.clear();
+                _stockData.clear();
+              });
+              FirebaseAuth.instance.signOut();
+            },
+          ),
+        ],
       ),
       body: Padding(
         padding: const EdgeInsets.all(16.0),
@@ -129,7 +242,7 @@ class _StockHomePageState extends State<StockHomePage> {
             TextField(
               controller: _controller,
               decoration: InputDecoration(
-                labelText: 'Symbole (ex: AAPL, MSFT, TSLA)',
+                labelText: 'Symbole (ex: AAPL, TSLA)',
                 border: const OutlineInputBorder(),
                 suffixIcon: IconButton(
                   icon: const Icon(Icons.search, color: Colors.blueAccent),
@@ -142,9 +255,7 @@ class _StockHomePageState extends State<StockHomePage> {
             Expanded(
               child: _stocks.isEmpty
                   ? const Center(
-                      child: Text(
-                        "Ajoutez une action pour voir son prix en direct !",
-                      ),
+                      child: Text("Votre portefeuille Cloud est vide !"),
                     )
                   : ListView.builder(
                       itemCount: _stocks.length,
@@ -155,12 +266,7 @@ class _StockHomePageState extends State<StockHomePage> {
                         if (data == null) {
                           return Card(
                             child: ListTile(
-                              title: Text(
-                                symbol,
-                                style: const TextStyle(
-                                  fontWeight: FontWeight.bold,
-                                ),
-                              ),
+                              title: Text(symbol),
                               trailing: const CircularProgressIndicator(),
                             ),
                           );
@@ -188,10 +294,7 @@ class _StockHomePageState extends State<StockHomePage> {
                                 fontSize: 18,
                               ),
                             ),
-                            subtitle: Text(
-                              "${data['price']} \$",
-                              style: const TextStyle(fontSize: 16),
-                            ),
+                            subtitle: Text("${data['price']} \$"),
                             trailing: Row(
                               mainAxisSize: MainAxisSize.min,
                               children: [
@@ -200,14 +303,10 @@ class _StockHomePageState extends State<StockHomePage> {
                                   style: TextStyle(
                                     color: priceColor,
                                     fontWeight: FontWeight.bold,
-                                    fontSize: 16,
                                   ),
                                 ),
                                 IconButton(
-                                  icon: const Icon(
-                                    Icons.delete,
-                                    color: Colors.white54,
-                                  ),
+                                  icon: const Icon(Icons.delete),
                                   onPressed: () => _removeStock(index),
                                 ),
                               ],

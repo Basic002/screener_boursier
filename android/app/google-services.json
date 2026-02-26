@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "339537085581",
+    "project_id": "screener-boursier",
+    "storage_bucket": "screener-boursier.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:339537085581:android:813748662c1191a7b00ec4",
+        "android_client_info": {
+          "package_name": "com.example.screener_boursier"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCaOSpMbZKtAYealNjr-BlUI3-I0q3tXzo"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
