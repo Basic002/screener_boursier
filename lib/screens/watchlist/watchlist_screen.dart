@@ -1,21 +1,25 @@
 import 'package:flutter/material.dart';
 import '../../models/stock_quote.dart';
 import '../../services/auth_service.dart';
+import '../../services/cache_service.dart';
 import '../../services/finnhub_service.dart';
 import '../../services/watchlist_service.dart';
 import 'widgets/stock_card.dart';
 
-/// Écran principal de la watchlist boursière.
+/// Écran principal optimisé de la watchlist boursière.
+/// Utilise le pattern Stale-While-Revalidate et l'UI optimiste pour une fluidité maximale.
 class WatchlistScreen extends StatefulWidget {
   final AuthService? authService;
   final WatchlistService? watchlistService;
   final FinnhubService? finnhubService;
+  final CacheService? cacheService;
 
   const WatchlistScreen({
     super.key,
     this.authService,
     this.watchlistService,
     this.finnhubService,
+    this.cacheService,
   });
 
   @override
@@ -26,6 +30,7 @@ class _WatchlistScreenState extends State<WatchlistScreen> {
   late final AuthService _authService;
   late final WatchlistService _watchlistService;
   late final FinnhubService _finnhubService;
+  late final CacheService _cacheService;
 
   final TextEditingController _symbolController = TextEditingController();
 
@@ -45,8 +50,10 @@ class _WatchlistScreenState extends State<WatchlistScreen> {
     _authService = widget.authService ?? AuthService();
     _watchlistService = widget.watchlistService ?? WatchlistService();
     _finnhubService = widget.finnhubService ?? FinnhubService();
+    _cacheService = widget.cacheService ?? CacheService();
 
-    _loadWatchlist();
+    // 1. Chargement instantané depuis le cache local, puis synchronisation Cloud
+    _loadFromCacheAndSync();
   }
 
   @override
@@ -55,8 +62,22 @@ class _WatchlistScreenState extends State<WatchlistScreen> {
     super.dispose();
   }
 
-  /// Charge la liste des symboles depuis Firestore puis interroge Finnhub.
-  Future<void> _loadWatchlist() async {
+  /// Charge immédiatement les données depuis le cache local (0 ms),
+  /// puis synchronise en arrière-plan avec Firestore et Finnhub.
+  Future<void> _loadFromCacheAndSync() async {
+    // Étape A : Lecture immédiate du cache local (Stale)
+    final cachedSymbols = await _cacheService.getWatchlist();
+    final cachedQuotes = await _cacheService.getQuotes();
+
+    if (mounted && (cachedSymbols.isNotEmpty || cachedQuotes.isNotEmpty)) {
+      setState(() {
+        _symbols = cachedSymbols;
+        _quotes.addAll(cachedQuotes);
+        _isInitialLoading = false;
+      });
+    }
+
+    // Étape B : Synchronisation Cloud en arrière-plan (Revalidate)
     final uid = _userId;
     if (uid == null) {
       if (mounted) setState(() => _isInitialLoading = false);
@@ -64,31 +85,41 @@ class _WatchlistScreenState extends State<WatchlistScreen> {
     }
 
     try {
-      final symbols = await _watchlistService.getWatchlist(uid);
+      final remoteSymbols = await _watchlistService.getWatchlist(uid);
+
       if (!mounted) return;
 
-      setState(() {
-        _symbols = symbols;
-        _isInitialLoading = false;
-      });
+      if (remoteSymbols.isNotEmpty || _symbols.isEmpty) {
+        setState(() {
+          _symbols = remoteSymbols;
+          _isInitialLoading = false;
+        });
+        _cacheService.saveWatchlist(remoteSymbols);
+      } else {
+        setState(() => _isInitialLoading = false);
+      }
 
-      // Rafraîchit les cotations
+      // Actualisation des cours
       await _refreshAllQuotes();
     } catch (e) {
       if (!mounted) return;
       setState(() => _isInitialLoading = false);
-      _showErrorSnackBar(e.toString());
     }
   }
 
-  /// Rafraîchit les cours de toutes les actions de la liste.
-  Future<void> _refreshAllQuotes() async {
-    final futures = _symbols.map((symbol) => _fetchSingleQuote(symbol));
+  /// Rafraîchit les cotations de façon concurrente avec mise en cache.
+  Future<void> _refreshAllQuotes({bool forceNetwork = false}) async {
+    if (_symbols.isEmpty) return;
+
+    final futures = _symbols.map((symbol) => _fetchSingleQuote(symbol, forceNetwork: forceNetwork));
     await Future.wait(futures);
+
+    // Sauvegarde des nouvelles cotations en cache
+    _cacheService.saveQuotes(_quotes);
   }
 
-  /// Récupère la cotation d'un symbole unique avec gestion d'erreurs claire.
-  Future<void> _fetchSingleQuote(String symbol) async {
+  /// Récupère la cotation d'un symbole unique.
+  Future<void> _fetchSingleQuote(String symbol, {bool forceNetwork = false}) async {
     if (!mounted) return;
     setState(() {
       _loadingSymbols.add(symbol);
@@ -96,7 +127,7 @@ class _WatchlistScreenState extends State<WatchlistScreen> {
     });
 
     try {
-      final quote = await _finnhubService.fetchQuote(symbol);
+      final quote = await _finnhubService.fetchQuote(symbol, forceRefresh: forceNetwork);
       if (!mounted) return;
 
       setState(() {
@@ -105,9 +136,12 @@ class _WatchlistScreenState extends State<WatchlistScreen> {
       });
     } catch (e) {
       if (!mounted) return;
-      setState(() {
-        _errors[symbol] = e.toString();
-      });
+      // Ne pas écraser une valeur valide en cache par une erreur réseau temporaire
+      if (!_quotes.containsKey(symbol)) {
+        setState(() {
+          _errors[symbol] = e.toString();
+        });
+      }
     } finally {
       if (mounted) {
         setState(() => _loadingSymbols.remove(symbol));
@@ -115,7 +149,7 @@ class _WatchlistScreenState extends State<WatchlistScreen> {
     }
   }
 
-  /// Valide et ajoute un nouveau symbole.
+  /// Ajout optimiste instantané (0 ms de latence perçue).
   Future<void> _addSymbol() async {
     final rawInput = _symbolController.text.trim();
     final symbol = rawInput.toUpperCase();
@@ -133,35 +167,57 @@ class _WatchlistScreenState extends State<WatchlistScreen> {
     final uid = _userId;
     if (uid == null) return;
 
-    setState(() => _isAdding = true);
+    // 1. Mise à jour immédiate de l'UI (Optimiste)
+    setState(() {
+      _symbols.insert(0, symbol);
+      _loadingSymbols.add(symbol);
+      _symbolController.clear();
+      _isAdding = true;
+    });
     FocusScope.of(context).unfocus();
 
-    try {
-      // 1. Validation du ticker auprès de Finnhub
-      final quote = await _finnhubService.fetchQuote(symbol);
+    // 2. Sauvegarde locale immédiate
+    _cacheService.saveWatchlist(_symbols);
 
-      // 2. Sauvegarde Firestore
-      await _watchlistService.addSymbol(uid, symbol);
+    try {
+      // 3. Exécution concurrente : requête Finnhub + sauvegarde Firestore
+      final results = await Future.wait([
+        _finnhubService.fetchQuote(symbol, forceRefresh: true),
+        _watchlistService.addSymbol(uid, symbol),
+      ]);
+
+      final quote = results[0] as StockQuote;
 
       if (!mounted) return;
 
       setState(() {
-        _symbols.insert(0, symbol);
         _quotes[symbol] = quote;
+        _loadingSymbols.remove(symbol);
         _errors.remove(symbol);
-        _symbolController.clear();
       });
+
+      _cacheService.saveQuotes(_quotes);
 
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Action $symbol ajoutée avec succès !'),
+          content: Text('Action $symbol ajoutée !'),
           backgroundColor: Colors.green.shade700,
           behavior: SnackBarBehavior.floating,
           duration: const Duration(seconds: 2),
         ),
       );
     } catch (e) {
+      // En cas d'erreur (symbole invalide), annulation (Rollback)
       if (!mounted) return;
+
+      setState(() {
+        _symbols.remove(symbol);
+        _loadingSymbols.remove(symbol);
+        _quotes.remove(symbol);
+      });
+      _cacheService.saveWatchlist(_symbols);
+      _watchlistService.removeSymbol(uid, symbol);
+
       _showErrorSnackBar(e.toString());
     } finally {
       if (mounted) {
@@ -170,7 +226,7 @@ class _WatchlistScreenState extends State<WatchlistScreen> {
     }
   }
 
-  /// Supprime un symbole de la liste et de Firestore.
+  /// Suppression optimiste instantanée (0 ms).
   Future<void> _removeSymbol(String symbol) async {
     final uid = _userId;
     if (uid == null) return;
@@ -178,40 +234,37 @@ class _WatchlistScreenState extends State<WatchlistScreen> {
     final index = _symbols.indexOf(symbol);
     final previousQuote = _quotes[symbol];
 
+    // Suppression immédiate de l'UI
     setState(() {
       _symbols.remove(symbol);
       _quotes.remove(symbol);
       _errors.remove(symbol);
     });
 
-    try {
-      await _watchlistService.removeSymbol(uid, symbol);
+    _cacheService.saveWatchlist(_symbols);
 
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('$symbol retiré de votre suivi.'),
-          behavior: SnackBarBehavior.floating,
-          action: SnackBarAction(
-            label: 'Annuler',
-            onPressed: () async {
-              setState(() {
-                _symbols.insert(index, symbol);
-                if (previousQuote != null) _quotes[symbol] = previousQuote;
-              });
-              await _watchlistService.addSymbol(uid, symbol);
-            },
-          ),
+    // Sauvegarde Cloud en arrière-plan
+    _watchlistService.removeSymbol(uid, symbol);
+
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('$symbol retiré de votre suivi.'),
+        behavior: SnackBarBehavior.floating,
+        duration: const Duration(seconds: 3),
+        action: SnackBarAction(
+          label: 'Annuler',
+          onPressed: () {
+            setState(() {
+              _symbols.insert(index, symbol);
+              if (previousQuote != null) _quotes[symbol] = previousQuote;
+            });
+            _cacheService.saveWatchlist(_symbols);
+            _watchlistService.addSymbol(uid, symbol);
+          },
         ),
-      );
-    } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _symbols.insert(index, symbol);
-        if (previousQuote != null) _quotes[symbol] = previousQuote;
-      });
-      _showErrorSnackBar('Erreur lors de la suppression : $e');
-    }
+      ),
+    );
   }
 
   void _showErrorSnackBar(String message) {
@@ -239,6 +292,11 @@ class _WatchlistScreenState extends State<WatchlistScreen> {
         centerTitle: true,
         actions: [
           IconButton(
+            icon: const Icon(Icons.refresh),
+            tooltip: 'Actualiser les cours',
+            onPressed: () => _refreshAllQuotes(forceNetwork: true),
+          ),
+          IconButton(
             icon: const Icon(Icons.logout, color: Colors.redAccent),
             tooltip: 'Se déconnecter',
             onPressed: () => _authService.signOut(),
@@ -258,7 +316,6 @@ class _WatchlistScreenState extends State<WatchlistScreen> {
                       controller: _symbolController,
                       textCapitalization: TextCapitalization.characters,
                       autocorrect: false,
-                      enabled: !_isAdding,
                       decoration: InputDecoration(
                         hintText: 'Ajouter un symbole (ex: AAPL, NVDA, TSLA)...',
                         prefixIcon: const Icon(Icons.search),
@@ -298,7 +355,7 @@ class _WatchlistScreenState extends State<WatchlistScreen> {
                   : _symbols.isEmpty
                       ? _buildEmptyState()
                       : RefreshIndicator(
-                          onRefresh: _refreshAllQuotes,
+                          onRefresh: () => _refreshAllQuotes(forceNetwork: true),
                           child: ListView.builder(
                             physics: const AlwaysScrollableScrollPhysics(),
                             itemCount: _symbols.length,
@@ -315,7 +372,7 @@ class _WatchlistScreenState extends State<WatchlistScreen> {
                                 quote: quote,
                                 isLoading: isLoading,
                                 errorMessage: errorMessage,
-                                onRetry: () => _fetchSingleQuote(symbol),
+                                onRetry: () => _fetchSingleQuote(symbol, forceNetwork: true),
                                 onDelete: () => _removeSymbol(symbol),
                               );
                             },

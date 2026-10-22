@@ -41,15 +41,17 @@ class StockTrackerApp extends StatelessWidget {
         ),
       ),
       home: StreamBuilder<User?>(
+        initialData: authService.currentUser,
         stream: authService.authStateChanges,
         builder: (context, snapshot) {
+          // Si l'utilisateur est déjà connu, affichage immédiat
+          if (snapshot.data != null) {
+            return const WatchlistScreen();
+          }
           if (snapshot.connectionState == ConnectionState.waiting) {
             return const Scaffold(
               body: Center(child: CircularProgressIndicator()),
             );
-          }
-          if (snapshot.hasData && snapshot.data != null) {
-            return const WatchlistScreen();
           }
           return const AuthScreen();
         },

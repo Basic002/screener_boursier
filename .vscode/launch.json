@@ -2,21 +2,32 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "screener_boursier",
-            "request": "launch",
-            "type": "dart"
-        },
-        {
-            "name": "screener_boursier (Profile)",
+            "name": "screener_boursier (Chrome Debug)",
             "request": "launch",
             "type": "dart",
-            "flutterMode": "profile"
+            "args": [
+                "-d",
+                "chrome"
+            ]
         },
         {
-            "name": "screener_boursier (Release)",
+            "name": "screener_boursier (Chrome Release - Ultra Rapide)",
             "request": "launch",
             "type": "dart",
-            "flutterMode": "release"
+            "flutterMode": "release",
+            "args": [
+                "-d",
+                "chrome"
+            ]
+        },
+        {
+            "name": "screener_boursier (Windows Natif)",
+            "request": "launch",
+            "type": "dart",
+            "args": [
+                "-d",
+                "windows"
+            ]
         }
     ]
 }

@@ -50,6 +50,38 @@ class StockQuote {
     );
   }
 
+  /// Convertit l'objet pour la sauvegarde en cache local.
+  Map<String, dynamic> toJson() {
+    return {
+      'symbol': symbol,
+      'currentPrice': currentPrice,
+      'change': change,
+      'percentChange': percentChange,
+      'highPrice': highPrice,
+      'lowPrice': lowPrice,
+      'openPrice': openPrice,
+      'previousClose': previousClose,
+      'timestamp': timestamp?.millisecondsSinceEpoch,
+    };
+  }
+
+  /// Reconstruit l'objet depuis le cache local.
+  factory StockQuote.fromJson(Map<String, dynamic> json) {
+    return StockQuote(
+      symbol: json['symbol'] ?? '',
+      currentPrice: (json['currentPrice'] as num?)?.toDouble() ?? 0.0,
+      change: (json['change'] as num?)?.toDouble() ?? 0.0,
+      percentChange: (json['percentChange'] as num?)?.toDouble() ?? 0.0,
+      highPrice: (json['highPrice'] as num?)?.toDouble(),
+      lowPrice: (json['lowPrice'] as num?)?.toDouble(),
+      openPrice: (json['openPrice'] as num?)?.toDouble(),
+      previousClose: (json['previousClose'] as num?)?.toDouble(),
+      timestamp: json['timestamp'] != null
+          ? DateTime.fromMillisecondsSinceEpoch(json['timestamp'] as int)
+          : null,
+    );
+  }
+
   /// Retourne le texte formaté du pourcentage (ex: "+1.25%" ou "-0.80%").
   String get formattedPercent {
     final sign = isPositive ? '+' : '';
